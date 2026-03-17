@@ -5,12 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>MatTrack — Project Material Manager</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Sora:wght@300;400;600;700&display=swap" rel="stylesheet"/>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<script>
-  if (typeof pdfjsLib !== 'undefined') {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-  }
-</script>
+
 <style>
   :root {
     --bg: #0d1117;
@@ -1195,46 +1190,22 @@ let _pdfRaw = null;
 function handlePdfUpload(file) {
   if (!file) return;
 
-  if (typeof pdfjsLib === 'undefined') {
-    const dz = document.getElementById('drop-zone');
-    dz.innerHTML = `<div class="drop-icon">❌</div><div class="drop-text">PDF library not loaded</div><div class="drop-hint">Check your internet connection and refresh the page, then try again.</div>`;
-    return;
-  }
-
   const reader = new FileReader();
   reader.onload = async e => {
     const dz = document.getElementById('drop-zone');
     dz.innerHTML = `<div class="drop-icon">⏳</div><div class="drop-text">Reading PDF…</div><div class="drop-hint">Extracting text content</div>`;
 
     try {
-      const typedArray = new Uint8Array(e.target.result);
-      const pdf = await pdfjsLib.getDocument({ data: typedArray }).promise;
-      let fullText = '';
-      for (let p = 1; p <= pdf.numPages; p++) {
-        const page = await pdf.getPage(p);
-        const content = await page.getTextContent();
-        // Sort items by Y then X to preserve reading order
-        const items = content.items.slice().sort((a, b) => {
-          const dy = Math.round(b.transform[5]) - Math.round(a.transform[5]);
-          return dy !== 0 ? dy : a.transform[4] - b.transform[4];
-        });
-        // Group into lines by Y position
-        let lastY = null, line = [];
-        items.forEach(item => {
-          const y = Math.round(item.transform[5]);
-          if (lastY !== null && Math.abs(y - lastY) > 3) {
-            fullText += line.join(' ') + '\n';
-            line = [];
-          }
-          line.push(item.str);
-          lastY = y;
-        });
-        if (line.length) fullText += line.join(' ') + '\n';
-      }
-      _pdfRaw = fullText;
+      const bytes = new Uint8Array(e.target.result);
+      const text = extractPdfText(bytes);
 
+      if (!text || text.trim().length < 30) {
+        throw new Error('Could not extract text. Make sure the PDF is a text-based SAP export, not a scanned image.');
+      }
+
+      _pdfRaw = text;
       dz.classList.add('loaded');
-      dz.innerHTML = `<div class="drop-icon">✅</div><div class="drop-text">${file.name}</div><div class="drop-hint">${pdf.numPages} page(s) read — proceed to Step 2</div>`;
+      dz.innerHTML = `<div class="drop-icon">✅</div><div class="drop-text">${file.name}</div><div class="drop-hint">PDF read successfully — proceed to Step 2</div>`;
       const s2 = document.getElementById('step-project');
       s2.style.opacity = '1'; s2.style.pointerEvents = 'auto';
       document.getElementById('btn-parse').disabled = false;
@@ -1245,6 +1216,68 @@ function handlePdfUpload(file) {
   };
   reader.readAsArrayBuffer(file);
 }
+
+// ── Pure JS PDF text extractor (no external library) ─────────
+// Reads a SAP-generated text PDF by parsing raw PDF byte streams.
+function extractPdfText(bytes) {
+  // Convert bytes to latin-1 string for regex parsing
+  let raw = '';
+  for (let i = 0; i < bytes.length; i++) raw += String.fromCharCode(bytes[i]);
+
+  let allText = '';
+
+  // Strategy 1: Extract text from BT...ET blocks (standard PDF text objects)
+  const pageBlocks = raw.match(/BT[\s\S]*?ET/g) || [];
+  if (pageBlocks.length > 0) {
+    for (const block of pageBlocks) {
+      // Extract Tj and TJ operators
+      // Tj: (text)Tj
+      const tjMatches = block.match(/\(([^)]*)\)\s*Tj/g) || [];
+      for (const m of tjMatches) {
+        const t = m.match(/\(([^)]*)\)/);
+        if (t) allText += decodePdfString(t[1]) + ' ';
+      }
+      // TJ: [(text)-num(text)]TJ
+      const tjArrayMatches = block.match(/\[([^\]]*)\]\s*TJ/g) || [];
+      for (const m of tjArrayMatches) {
+        const parts = m.match(/\(([^)]*)\)/g) || [];
+        for (const p of parts) {
+          allText += decodePdfString(p.slice(1, -1));
+        }
+        allText += ' ';
+      }
+    }
+  }
+
+  // Strategy 2: If BT/ET extraction gave nothing, try raw stream decompression approach
+  // Extract all readable ASCII text runs from the raw bytes (works for uncompressed PDFs)
+  if (allText.trim().length < 30) {
+    const asciiRuns = raw.match(/[\x20-\x7E]{6,}/g) || [];
+    allText = asciiRuns
+      .filter(r => !r.startsWith('%') && !/^[0-9\s\.\-\/]+$/.test(r))
+      .join('\n');
+  }
+
+  // Normalize: collapse whitespace, fix line breaks
+  return allText
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
+function decodePdfString(s) {
+  // Handle PDF escape sequences
+  return s
+    .replace(/\\n/g, ' ')
+    .replace(/\\r/g, ' ')
+    .replace(/\\t/g, ' ')
+    .replace(/\\\(/g, '(')
+    .replace(/\\\)/g, ')')
+    .replace(/\\\\/g, '\\')
+    .replace(/\\(\d{3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)));
+}
+
 
 async function runAIParse() {
   if (!_pdfRaw) { alert('Please upload a PDF first.'); return; }
