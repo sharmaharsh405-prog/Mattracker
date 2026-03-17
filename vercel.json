@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "functions": {
+    "api/parse-pdf.py": {
+      "runtime": "python3.9",
+      "maxDuration": 30
+    },
+    "api/health.py": {
+      "runtime": "python3.9"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/health",
+      "dest": "/api/health.py"
+    },
+    {
+      "src": "/api/parse-pdf",
+      "dest": "/api/parse-pdf.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ]
+}
